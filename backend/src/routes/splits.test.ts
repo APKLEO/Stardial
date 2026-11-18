@@ -19,6 +19,27 @@ const serverMock = {
   getEvents: getEventsMock,
 };
 
+// Database is not wired up in this test suite — mock it to avoid "not initialized" errors
+vi.mock("../services/database.js", () => ({
+  getDataSource: vi.fn(() => ({ isInitialized: true })),
+  withTransaction: vi.fn(),
+  initDatabase: vi.fn(),
+  closeDatabase: vi.fn(),
+}));
+
+// Stub project-expiration and project-history so route tests stay focused on
+// the HTTP / XDR-building layer without needing a live database
+vi.mock("../services/project-expiration.js", () => ({
+  assertProjectNotExpired: vi.fn().mockResolvedValue(undefined),
+  configureProjectExpiration: vi.fn().mockResolvedValue({ expiresAt: null }),
+  recordSplitCreated: vi.fn().mockResolvedValue(undefined),
+  getProjectExpiration: vi.fn().mockResolvedValue(null),
+}));
+
+vi.mock("../services/project-history.js", () => ({
+  recordProjectEdit: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock("@stellar/stellar-sdk", () => {
   class ScMapEntry {
     key: unknown;
@@ -1285,5 +1306,112 @@ describe("POST /splits idempotency (Issue #888)", () => {
     await request(app).post("/splits").send(payload).expect(200);
 
     expect(prepareTransactionMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ============================================================
+// Issue #30: Partial updates for PATCH /:projectId/metadata
+// ============================================================
+
+describe("Issue #30: PATCH /:projectId/metadata partial updates", () => {
+  const OWNER = "GOWNER";
+  const PROJECT_ID = "partial_meta";
+
+  beforeEach(() => {
+    getAccountMock.mockImplementation(async (address: string) => ({ accountId: address }));
+    prepareTransactionMock.mockResolvedValue({
+      toXDR: () => "XDR_PARTIAL_OK",
+      sequence: "1",
+      fee: "100",
+    });
+    // Pre-populate the read cache so fetchProjectById never hits the RPC server.
+    // This exercises the merge logic without needing a live RPC mock sequence.
+    invalidateCacheByPrefix("project:");
+    setCached(`project:${PROJECT_ID}`, {
+      owner: OWNER,
+      locked: false,
+      collaborators: [],
+      title: "Original Title",
+      projectType: "music",
+      balance: "0",
+      expiresAt: null,
+    });
+  });
+
+  it("accepts a body with only title and merges the existing projectType", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: OWNER, title: "New Title" })
+      .expect(200);
+
+    expect(response.body.xdr).toBe("XDR_PARTIAL_OK");
+    expect(response.body.metadata.sourceAccount).toBe(OWNER);
+    expect(response.body.metadata.operation).toBe("update_project_metadata");
+  });
+
+  it("accepts a body with only projectType and merges the existing title", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: OWNER, projectType: "podcast" })
+      .expect(200);
+
+    expect(response.body.xdr).toBe("XDR_PARTIAL_OK");
+    expect(response.body.metadata.sourceAccount).toBe(OWNER);
+    expect(response.body.metadata.operation).toBe("update_project_metadata");
+  });
+
+  it("accepts a body with both title and projectType (regression: full update still works)", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: OWNER, title: "New Title", projectType: "podcast" })
+      .expect(200);
+
+    expect(response.body.xdr).toBe("XDR_PARTIAL_OK");
+    expect(response.body.metadata.sourceAccount).toBe(OWNER);
+  });
+
+  it("rejects a body with neither title nor projectType with 400", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: OWNER })
+      .expect(400);
+
+    expect(response.body.error).toBe("validation_error");
+    expect(prepareTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty body with 400", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({})
+      .expect(400);
+
+    expect(response.body.error).toBe("validation_error");
+    expect(prepareTransactionMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid owner address with 400", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: "not-a-stellar-address", title: "New Title" })
+      .expect(400);
+
+    expect(response.body.error).toBe("validation_error");
+  });
+
+  it("rejects a title with disallowed characters with 400", async () => {
+    const app = createApp();
+    const response = await request(app)
+      .patch(`/splits/${PROJECT_ID}/metadata`)
+      .send({ owner: OWNER, title: "Title with @invalid# chars!" })
+      .expect(400);
+
+    expect(response.body.error).toBe("validation_error");
   });
 });

@@ -466,15 +466,42 @@ splitsRouter.patch("/:projectId/metadata", async (req, res, next) => {
     }
 
     try {
+      const projectId = parsedParams.data;
+      const { owner, title: titlePatch, projectType: projectTypePatch } = parsedBody.data;
+
+      // Partial-update: fetch current on-chain state to fill in any omitted fields
+      // so the contract call always receives a complete, valid metadata payload.
+      let resolvedTitle = titlePatch;
+      let resolvedProjectType = projectTypePatch;
+
+      if (resolvedTitle === undefined || resolvedProjectType === undefined) {
+        const current = await fetchProjectById(projectId);
+        if (!current) {
+          throw new AppError(
+            ErrorType.RPC,
+            ErrorCode.NOT_FOUND,
+            `Split project ${projectId} not found.`
+          );
+        }
+        const currentRecord = current as Record<string, unknown>;
+        if (resolvedTitle === undefined) {
+          resolvedTitle = typeof currentRecord.title === "string" ? currentRecord.title : "";
+        }
+        if (resolvedProjectType === undefined) {
+          resolvedProjectType =
+            typeof currentRecord.projectType === "string" ? currentRecord.projectType : "";
+        }
+      }
+
       const result = await buildUpdateMetadataUnsignedXdr({
-        projectId: parsedParams.data,
-        owner: parsedBody.data.owner,
-        title: parsedBody.data.title,
-        projectType: parsedBody.data.projectType,
+        projectId,
+        owner,
+        title: resolvedTitle,
+        projectType: resolvedProjectType,
       });
-      await recordProjectEdit(parsedParams.data, parsedBody.data.owner, "update_metadata", {
-        title: parsedBody.data.title,
-        projectType: parsedBody.data.projectType
+      await recordProjectEdit(projectId, owner, "update_metadata", {
+        title: resolvedTitle,
+        projectType: resolvedProjectType,
       });
       return res.status(200).json(result);
     } catch (error) {

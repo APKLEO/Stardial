@@ -133,11 +133,16 @@ export const depositSchema = z.object({
   token: stellarAddressSchema.describe("token")
 });
 
-export const updateMetadataSchema = z.object({
-  owner: stellarAddressSchema.describe("owner"),
-  title: titleField,
-  projectType: projectTypeField
-});
+export const updateMetadataSchema = z
+  .object({
+    owner: stellarAddressSchema.describe("owner"),
+    title: titleField.optional(),
+    projectType: projectTypeField.optional(),
+  })
+  .refine((data) => data.title !== undefined || data.projectType !== undefined, {
+    message: "At least one of title or projectType must be provided.",
+    path: ["title"],
+  });
 
 export const updateCollaboratorsSchema = z
   .object({
